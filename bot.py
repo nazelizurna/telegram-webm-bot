@@ -27,8 +27,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ffmpeg", "-y",
         "-i", input_path,
         "-t", "3",
-        "-vf", "scale=512:512:force_original_aspect_ratio=decrease,"
-               "pad=512:512:(ow-iw)/2:(oh-ih)/2,fps=30",
+        "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=512:512,fps=30",
         "-an",
         "-c:v", "libvpx-vp9",
         "-b:v", "150K",
