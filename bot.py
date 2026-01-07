@@ -24,20 +24,20 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(input_path)
 
     ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-i", input_path,
-        "-t", "3",
-        "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=512:512,fps=30",
-        "-an",
-        "-c:v", "libvpx-vp9",
-        "-b:v", "150K",
-        "-maxrate", "150K",
-        "-bufsize", "300K",
-        "-crf", "40",
-        "-deadline", "realtime",
-        "-cpu-used", "5",
-        output_path
-    ]
+    "ffmpeg", "-y",
+    "-i", input_path,
+    "-t", "3",
+    "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=512:512,fps=30",
+    "-an",
+    "-c:v", "libvpx-vp9",
+    "-b:v", "150K",
+    "-maxrate", "150K",
+    "-bufsize", "300K",
+    "-crf", "40",
+    "-deadline", "realtime",
+    "-cpu-used", "5",
+    output_path
+]
 
     subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
