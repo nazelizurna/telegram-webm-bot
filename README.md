@@ -1,96 +1,68 @@
-Telegram WebM Converter Bot
-===========================
+# Telegram WebM Sticker Bot
 
-A Telegram bot that converts videos sent to it into WebM format with the following specifications:
+A Telegram bot that converts videos and GIFs into WebM stickers compatible with Telegram's sticker requirements.
 
-- Format: .webm
-- Codec: VP9 (libvpx-vp9)
+## What it does
+
+Send the bot any video or GIF and it returns a `.webm` file ready to use as an animated Telegram sticker:
+
+- Format: WebM (VP9 codec)
 - Resolution: 512 x 512 pixels
 - Duration: up to 3 seconds
-- Frame rate: 30 fps
-- Audio: removed
-- Maximum file size: 256 KB
+- Audio: stripped
+- File size: under 256 KB
 
-The bot runs 24/7 in the cloud (e.g., Railway) and processes videos automatically.
+## Requirements
 
-Features
---------
+- Python 3.10+
+- ffmpeg installed and available in PATH
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
-- Converts videos to VP9 WebM
-- Pads videos to square format (512x512) while preserving aspect ratio
-- Trims videos to 3 seconds
-- Strips audio
-- Automatically replies with the converted file
-- Handles videos sent as video messages or documents
+## Installation
 
-Requirements
-------------
+```bash
+git clone https://github.com/your-username/your-repo.git
+cd your-repo
+pip install -r requirements.txt
+```
 
-- Python 3.9+
-- FFmpeg installed (Dockerfile includes FFmpeg)
-- python-telegram-bot==20.7
+## Configuration
 
-Setup
------
+Set your bot token as an environment variable:
 
-1. Clone the repository:
+```bash
+export BOT_TOKEN=your_token_here
+```
 
-   git clone https://github.com/nazelizurna/telegram-webm-bot.git
-   cd telegram-webm-bot
+## Running locally
 
-2. Install dependencies (optional if using Docker):
+```bash
+python bot.py
+```
 
-   pip install -r requirements.txt
+The bot will start in polling mode.
 
-3. Set your Telegram bot token:
+## Deploying to Render
 
-   Linux/macOS:
-       export BOT_TOKEN="YOUR_BOT_TOKEN"
-   Windows:
-       set BOT_TOKEN="YOUR_BOT_TOKEN"
+1. Create a new Web Service on [Render](https://render.com).
+2. Set the `BOT_TOKEN` environment variable in the Render dashboard.
+3. Use `gunicorn` as the start command with your webhook setup.
+4. The `/health` endpoint returns `200 OK` and can be used as a health check.
 
-4. Run the bot locally (optional):
+## Accepted input
 
-   python bot.py
+- Video files
+- Animations (GIF)
+- Documents with a video or GIF MIME type
 
-Deployment (Recommended: Cloud)
-------------------------------
+## Dependencies
 
-1. Push the repository to GitHub.
-2. Use Railway (or any cloud with Docker support) to deploy.
-3. Railway will detect the Dockerfile and start the bot.
-4. Set the BOT_TOKEN environment variable in Railway.
-5. The bot runs 24/7.
+```
+python-telegram-bot
+flask
+gunicorn
+```
 
-Docker
-------
+## License
 
-The included Dockerfile installs Python and FFmpeg automatically:
-
-FROM python:3.11-slim
-
-RUN apt-get update && \
-    apt-get install -y ffmpeg && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-CMD ["python", "bot.py"]
-
-Usage
------
-
-1. Open your Telegram bot.
-2. Send a video file.
-3. The bot converts it and sends back the WebM file.
-4. If the file exceeds 256 KB, the bot may fail or reject it.
-
-Limitations
------------
-
-- Large or complex videos may not fit under 256 KB.
+MIT
