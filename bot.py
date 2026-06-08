@@ -1,6 +1,7 @@
 import os
 import subprocess
 import logging
+import threading
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from flask import Flask
@@ -11,6 +12,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ========================= CONFIG =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set!")
@@ -20,10 +22,12 @@ OUTPUT_DIR = "outputs"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-MAX_SIZE_BYTES = 256 * 1024      # 256 KB
-MAX_DURATION_SEC = 3             # 3 seconds max
-TARGET_RESOLUTION = 512          # 512x512
+# Telegram sticker limits
+MAX_SIZE_BYTES = 256 * 1024  # 256 KB
+MAX_DURATION_SEC = 3         # 3 seconds max
+TARGET_RESOLUTION = 512
 
+# ======================= FLASK APP =======================
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -33,8 +37,9 @@ def home():
 @flask_app.route("/health")
 def health():
     return "OK", 200
+
+# ======================= HELPERS =======================
 def get_video_duration(path: str) -> float:
-    """Return video duration in seconds using ffprobe."""
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",
@@ -47,9 +52,7 @@ def get_video_duration(path: str) -> float:
     except (ValueError, AttributeError):
         return 0.0
 
-
 def get_video_dimensions(path: str) -> tuple[int, int]:
-    """Return (width, height) of the video using ffprobe."""
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -65,8 +68,14 @@ def get_video_dimensions(path: str) -> tuple[int, int]:
         return 0, 0
 
 def build_scale_filter(width: int, height: int) -> str:
+    """
+    Telegram sticker requirements (актуальная версия):
+    - Длинная сторона = ровно 512 px
+    - Короткая сторона ≤ 512 px
+    - Пропорции сохраняются (НЕ квадрат, без обрезки)
+    """
     return (
-        "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)':flags=lanczos," # one side = 512, the other side is < or = 512
+        "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)':flags=lanczos,"
         "fps=30"
     )
 
@@ -74,15 +83,17 @@ def convert_to_webm(input_path: str, output_path: str) -> bool:
     duration = min(get_video_duration(input_path), MAX_DURATION_SEC)
     width, height = get_video_dimensions(input_path)
     vf = build_scale_filter(width, height)
+
+    # Pass 1
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
         "-t", str(duration),
         "-vf", vf,
-        "-an",                          # no audio
+        "-an",
         "-c:v", "libvpx-vp9",
-        "-crf", "33",                   # quality-based (lower = better quality)
-        "-b:v", "0",                    # pure CRF mode (b:v=0 required for vp9 CRF)
+        "-crf", "33",
+        "-b:v", "0",
         "-deadline", "good",
         "-cpu-used", "3",
         output_path
@@ -95,9 +106,11 @@ def convert_to_webm(input_path: str, output_path: str) -> bool:
         logger.info("Pass-1 output size: %d bytes", size)
         if size <= MAX_SIZE_BYTES:
             return True
+
+    # Pass 2 (если слишком большой)
     logger.info("File too large, switching to constrained bitrate encode")
     target_kbps = int((MAX_SIZE_BYTES * 8 * 0.9) / (duration * 1000))
-    target_kbps = max(target_kbps, 50)   # floor at 50 Kbps
+    target_kbps = max(target_kbps, 50)
 
     cmd2 = [
         "ffmpeg", "-y",
@@ -120,12 +133,13 @@ def convert_to_webm(input_path: str, output_path: str) -> bool:
         size2 = os.path.getsize(output_path)
         logger.info("Pass-2 output size: %d bytes", size2)
         return size2 <= MAX_SIZE_BYTES
-
     return False
 
+# ======================= TELEGRAM BOT =======================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     video = None
+
     if message.video:
         video = message.video
     elif message.animation:
@@ -147,9 +161,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_file = await context.bot.get_file(file_id)
         await tg_file.download_to_drive(input_path)
 
-        await message.reply_text(
-            "⚙️ Конвертирую в WebM 512×512, до 3 с, без звука..."
-        )
+        await message.reply_text("⚙️ Конвертирую в WebM...")
 
         success = convert_to_webm(input_path, output_path)
 
@@ -161,7 +173,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     filename="sticker.webm",
                     caption=(
                         f"✅ Готово! Размер: {size_kb:.1f} КБ\n"
-                        "Формат: WebM VP9 • 512×512 • ≤3 с • без звука"
+                        "Формат: WebM VP9 • длинная сторона 512 px (короткая ≤512) • ≤3 с • без звука"
                     )
                 )
         else:
@@ -169,11 +181,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Не удалось уложиться в 256 КБ.\n"
                 "Попробуй видео покороче или с меньшим движением."
             )
-
     except Exception as e:
         logger.exception("Error processing video")
         await message.reply_text(f"❌ Ошибка: {e}")
-
     finally:
         for path in (input_path, output_path):
             if os.path.exists(path):
@@ -184,15 +194,16 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привет! Отправь мне видео или GIF, и я конвертирую его "
-        "в WebM-стикер для Telegram:\n\n"
-        "• 512×512 пикселей\n"
+        "👋 Привет! Отправь мне видео или GIF, и я сделаю из него WebM-стикер:\n\n"
+        "• Длинная сторона = 512 px\n"
+        "• Короткая сторона ≤ 512 px\n"
         "• до 3 секунд\n"
         "• без звука\n"
         "• до 256 КБ\n"
         "• кодек VP9"
     )
 
+# ======================= APP FACTORY =======================
 def create_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(
@@ -206,7 +217,18 @@ def create_app() -> Application:
     )
     return app
 
+# ======================= RUN FLASK + BOT =======================
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    logger.info("Starting Flask on 0.0.0.0:%d", port)
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+# ======================= MAIN =======================
 if __name__ == "__main__":
     bot_app = create_app()
-    print("🤖 Starting bot (polling mode)")
+
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    print("🤖 Starting bot (polling mode) + Flask health server")
     bot_app.run_polling()
