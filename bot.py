@@ -59,13 +59,15 @@ def get_video_dimensions(path: str) -> tuple[int, int]:
 
 def build_scale_filter(width: int, height: int) -> str:
     """
-    Делает так, чтобы:
+    Правильное масштабирование для Telegram Video Stickers:
     - Длинная сторона = ровно 512 px
     - Короткая сторона ≤ 512 px
-    - Без обрезки в квадрат!
+    - Пропорции сохраняются на 100% (без обрезки в квадрат!)
+    - Без растяжения и чёрных полос
     """
     return (
-        "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)':flags=lanczos,"
+        "scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,"
+        "setsar=1,"
         "fps=30"
     )
 
@@ -74,13 +76,16 @@ def convert_to_webm(input_path: str, output_path: str) -> bool:
     w, h = get_video_dimensions(input_path)
     vf = build_scale_filter(w, h)
 
-    # === ВАЖНО: Смотри в логах Render эту строку ===
+    # Логируем, какой фильтр реально применяется
     logger.info("VIDEO FILTER USED: %s", vf)
 
-    # Pass 1
+    # === Pass 1 ===
     cmd = [
         "ffmpeg", "-y", "-i", input_path, "-t", str(duration),
-        "-vf", vf, "-an", "-c:v", "libvpx-vp9",
+        "-vf", vf,
+        "-an",
+        "-c:v", "libvpx-vp9",
+        "-pix_fmt", "yuva420p",           # поддержка прозрачности
         "-crf", "33", "-b:v", "0",
         "-deadline", "good", "-cpu-used", "3",
         output_path
@@ -90,12 +95,16 @@ def convert_to_webm(input_path: str, output_path: str) -> bool:
     if os.path.exists(output_path) and os.path.getsize(output_path) <= MAX_SIZE_BYTES:
         return True
 
-    # Pass 2
+    # === Pass 2 (если нужно ужать до 256 КБ) ===
     target_kbps = max(int((MAX_SIZE_BYTES * 8 * 0.9) / (duration * 1000)), 50)
     cmd2 = [
         "ffmpeg", "-y", "-i", input_path, "-t", str(duration),
-        "-vf", vf, "-an", "-c:v", "libvpx-vp9",
-        "-b:v", f"{target_kbps}k", "-maxrate", f"{target_kbps}k",
+        "-vf", vf,
+        "-an",
+        "-c:v", "libvpx-vp9",
+        "-pix_fmt", "yuva420p",           # поддержка прозрачности
+        "-b:v", f"{target_kbps}k",
+        "-maxrate", f"{target_kbps}k",
         "-bufsize", f"{target_kbps * 2}k",
         "-deadline", "good", "-cpu-used", "4",
         output_path
@@ -124,7 +133,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_file = await context.bot.get_file(file_id)
         await tg_file.download_to_drive(input_path)
 
-        await message.reply_text("⚙️ Конвертирую в WebM (длинная сторона 512 px)...")
+        await message.reply_text("⚙️ Конвертирую в WebM (длинная сторона 512 px, пропорции сохранены)...")
 
         success = convert_to_webm(input_path, output_path)
 
@@ -135,18 +144,20 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     document=f,
                     filename="sticker.webm",
                     caption=f"✅ Готово! {size_kb:.1f} КБ\n"
-                            "WebM VP9 • длинная сторона 512 px (короткая ≤512) • ≤3с • без звука"
+                            "WebM VP9 • длинная сторона 512 px (короткая ≤512) • пропорции сохранены • ≤3с • без звука"
                 )
         else:
-            await message.reply_text("❌ Не удалось уложиться в 256 КБ. Попробуй короче видео.")
+            await message.reply_text("❌ Не удалось уложиться в 256 КБ. Попробуй короче видео или более простую анимацию.")
     except Exception as e:
         logger.exception(e)
         await message.reply_text(f"❌ Ошибка: {e}")
     finally:
         for p in (input_path, output_path):
             if os.path.exists(p):
-                try: os.remove(p)
-                except: pass
+                try:
+                    os.remove(p)
+                except:
+                    pass
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -154,6 +165,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Я сделаю стикер:\n"
         "• Длинная сторона = 512 px\n"
         "• Короткая сторона ≤ 512 px\n"
+        "• Пропорции сохраняются (без обрезки в квадрат!)\n"
         "• до 3 сек • без звука • до 256 КБ"
     )
 
