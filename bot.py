@@ -64,14 +64,11 @@ def get_video_dimensions(path: str) -> tuple[int, int]:
     except Exception:
         return 0, 0
 
-
 def build_scale_filter(width: int, height: int) -> str:
     return (
-        "crop=min(iw\\,ih):min(iw\\,ih),"   # square central crop
-        f"scale={TARGET_RESOLUTION}:{TARGET_RESOLUTION}:flags=lanczos,"  # 512×512
-        f"fps=30"                              # cap at 30 fps
+        "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)':flags=lanczos," # one side = 512, the other side is < or = 512
+        "fps=30"
     )
-
 
 def convert_to_webm(input_path: str, output_path: str) -> bool:
     duration = min(get_video_duration(input_path), MAX_DURATION_SEC)
