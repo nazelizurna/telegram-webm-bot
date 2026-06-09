@@ -24,7 +24,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 MAX_SIZE_BYTES = 256 * 1024
 MAX_DURATION_SEC = 3
-TARGET_RESOLUTION = 512
 
 # ======================= FLASK APP =======================
 flask_app = Flask(__name__)
@@ -41,75 +40,83 @@ def health():
 def get_video_duration(path: str) -> float:
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1", path]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        return float(result.stdout.decode().strip())
+        return float(result.stdout.strip())
     except:
         return 0.0
 
 def get_video_dimensions(path: str) -> tuple[int, int]:
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
            "-show_entries", "stream=width,height", "-of", "csv=p=0", path]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        w, h = result.stdout.decode().strip().split(",")
+        w, h = result.stdout.strip().split(",")
+        return int(w), int(h)
+    except:
+        return 0, 0
+
+def get_output_dimensions(path: str) -> tuple[int, int]:
+    """Получает реальные размеры готового webm"""
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "stream=width,height", "-of", "csv=p=0", path]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        w, h = result.stdout.strip().split(",")
         return int(w), int(h)
     except:
         return 0, 0
 
 def build_scale_filter(width: int, height: int) -> str:
     """
-    Правильное масштабирование для Telegram Video Stickers:
-    - Длинная сторона = ровно 512 px
-    - Короткая сторона ≤ 512 px
-    - Пропорции сохраняются на 100% (без обрезки в квадрат!)
-    - Без растяжения и чёрных полос
+    Самый простой и надёжный способ:
+    - Если видео горизонтальное → scale=512:-1 (высота автоматически)
+    - Если вертикальное → scale=-1:512 (ширина автоматически)
     """
-    return (
-        "scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,"
-        "setsar=1,"
-        "fps=30"
-    )
+    if width > height:
+        return "scale=512:-1:flags=lanczos,setsar=1,fps=30"
+    else:
+        return "scale=-1:512:flags=lanczos,setsar=1,fps=30"
 
 def convert_to_webm(input_path: str, output_path: str) -> bool:
     duration = min(get_video_duration(input_path), MAX_DURATION_SEC)
     w, h = get_video_dimensions(input_path)
     vf = build_scale_filter(w, h)
 
-    # Логируем, какой фильтр реально применяется
-    logger.info("VIDEO FILTER USED: %s", vf)
+    logger.info(f"Input: {w}x{h} → Filter: {vf}")
 
     # === Pass 1 ===
     cmd = [
         "ffmpeg", "-y", "-i", input_path, "-t", str(duration),
-        "-vf", vf,
-        "-an",
-        "-c:v", "libvpx-vp9",
-        "-pix_fmt", "yuva420p",           # поддержка прозрачности
+        "-vf", vf, "-an",
+        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
         "-crf", "33", "-b:v", "0",
         "-deadline", "good", "-cpu-used", "3",
         output_path
     ]
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
+    result1 = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    
+    if result1.returncode != 0:
+        logger.error(f"FFmpeg Pass 1 error: {result1.stderr}")
+    
     if os.path.exists(output_path) and os.path.getsize(output_path) <= MAX_SIZE_BYTES:
         return True
 
-    # === Pass 2 (если нужно ужать до 256 КБ) ===
+    # === Pass 2 ===
     target_kbps = max(int((MAX_SIZE_BYTES * 8 * 0.9) / (duration * 1000)), 50)
     cmd2 = [
         "ffmpeg", "-y", "-i", input_path, "-t", str(duration),
-        "-vf", vf,
-        "-an",
-        "-c:v", "libvpx-vp9",
-        "-pix_fmt", "yuva420p",           # поддержка прозрачности
-        "-b:v", f"{target_kbps}k",
-        "-maxrate", f"{target_kbps}k",
+        "-vf", vf, "-an",
+        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+        "-b:v", f"{target_kbps}k", "-maxrate", f"{target_kbps}k",
         "-bufsize", f"{target_kbps * 2}k",
         "-deadline", "good", "-cpu-used", "4",
         output_path
     ]
-    subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    if result2.returncode != 0:
+        logger.error(f"FFmpeg Pass 2 error: {result2.stderr}")
 
     return os.path.exists(output_path) and os.path.getsize(output_path) <= MAX_SIZE_BYTES
 
@@ -133,21 +140,26 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_file = await context.bot.get_file(file_id)
         await tg_file.download_to_drive(input_path)
 
-        await message.reply_text("⚙️ Конвертирую в WebM (длинная сторона 512 px, пропорции сохранены)...")
+        await message.reply_text("⚙️ Конвертирую (сохраняю пропорции)...")
 
         success = convert_to_webm(input_path, output_path)
 
         if success:
+            out_w, out_h = get_output_dimensions(output_path)
             size_kb = os.path.getsize(output_path) / 1024
+
+            logger.info(f"OUTPUT SIZE: {out_w}x{out_h} | {size_kb:.1f} KB")
+
             with open(output_path, "rb") as f:
                 await message.reply_document(
                     document=f,
                     filename="sticker.webm",
                     caption=f"✅ Готово! {size_kb:.1f} КБ\n"
-                            "WebM VP9 • длинная сторона 512 px (короткая ≤512) • пропорции сохранены • ≤3с • без звука"
+                            f"Размер: {out_w}×{out_h} px (длинная сторона 512)\n"
+                            "Пропорции сохранены • VP9 • ≤3с • без звука"
                 )
         else:
-            await message.reply_text("❌ Не удалось уложиться в 256 КБ. Попробуй короче видео или более простую анимацию.")
+            await message.reply_text("❌ Не удалось уложиться в 256 КБ. Попробуй короче видео.")
     except Exception as e:
         logger.exception(e)
         await message.reply_text(f"❌ Ошибка: {e}")
@@ -162,11 +174,10 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Отправь видео или GIF\n\n"
-        "Я сделаю стикер:\n"
+        "Я сделаю стикер с сохранением пропорций:\n"
         "• Длинная сторона = 512 px\n"
         "• Короткая сторона ≤ 512 px\n"
-        "• Пропорции сохраняются (без обрезки в квадрат!)\n"
-        "• до 3 сек • без звука • до 256 КБ"
+        "• Без обрезки в квадрат!"
     )
 
 def create_app():
