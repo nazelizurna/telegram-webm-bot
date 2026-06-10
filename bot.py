@@ -24,6 +24,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 MAX_SIZE_BYTES = 256 * 1024
 MAX_DURATION_SEC = 3
+TARGET_RESOLUTION = 512
 
 # ======================= FLASK APP =======================
 flask_app = Flask(__name__)
@@ -40,85 +41,80 @@ def health():
 def get_video_duration(path: str) -> float:
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1", path]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        return float(result.stdout.strip())
+        return float(result.stdout.decode().strip())
     except:
         return 0.0
 
 def get_video_dimensions(path: str) -> tuple[int, int]:
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
            "-show_entries", "stream=width,height", "-of", "csv=p=0", path]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        w, h = result.stdout.strip().split(",")
+        w, h = result.stdout.decode().strip().split(",")
         return int(w), int(h)
     except:
         return 0, 0
 
-def get_output_dimensions(path: str) -> tuple[int, int]:
-    """Получает реальные размеры готового webm"""
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-           "-show_entries", "stream=width,height", "-of", "csv=p=0", path]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        w, h = result.stdout.strip().split(",")
-        return int(w), int(h)
-    except:
-        return 0, 0
-
-def build_scale_filter(width: int, height: int) -> str:
+def calc_scaled_dimensions(width: int, height: int) -> tuple[int, int]:
     """
-    Самый простой и надёжный способ:
-    - Если видео горизонтальное → scale=512:-1 (высота автоматически)
-    - Если вертикальное → scale=-1:512 (ширина автоматически)
+    Масштабирует так, чтобы длинная сторона = 512 px,
+    короткая сторона автоматически вычисляется (сохраняет пропорции)
     """
     if width > height:
-        return "scale=512:-1:flags=lanczos,setsar=1,fps=30"
+        # Горизонтальное видео
+        new_width = TARGET_RESOLUTION
+        new_height = int(height * TARGET_RESOLUTION / width)
     else:
-        return "scale=-1:512:flags=lanczos,setsar=1,fps=30"
+        # Вертикальное или квадратное видео
+        new_height = TARGET_RESOLUTION
+        new_width = int(width * TARGET_RESOLUTION / height)
+    # Выравниваем до чётных (требование WebM)
+    new_width = new_width if new_width % 2 == 0 else new_width - 1
+    new_height = new_height if new_height % 2 == 0 else new_height - 1
+    return new_width, new_height
 
 def convert_to_webm(input_path: str, output_path: str) -> bool:
     duration = min(get_video_duration(input_path), MAX_DURATION_SEC)
     w, h = get_video_dimensions(input_path)
-    vf = build_scale_filter(w, h)
-
-    logger.info(f"Input: {w}x{h} → Filter: {vf}")
-
-    # === Pass 1 ===
+    
+    # Вычисляем размеры в Python - надёжнее, чем в FFmpeg-выражении
+    new_w, new_h = calc_scaled_dimensions(w, h)
+    
+    vf = f"scale={new_w}:{new_h}:flags=lanczos,fps=30"
+    logger.info("VIDEO FILTER USED: scale=%d:%d (from %dx%d)", new_w, new_h, w, h)
+    
+    # Pass 1 - CRF режатсия
     cmd = [
         "ffmpeg", "-y", "-i", input_path, "-t", str(duration),
-        "-vf", vf, "-an",
-        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+        "-vf", vf, "-an", "-c:v", "libvpx-vp9",
         "-crf", "33", "-b:v", "0",
         "-deadline", "good", "-cpu-used", "3",
         output_path
     ]
-    result1 = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    
-    if result1.returncode != 0:
-        logger.error(f"FFmpeg Pass 1 error: {result1.stderr}")
-    
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if os.path.exists(output_path) and os.path.getsize(output_path) <= MAX_SIZE_BYTES:
         return True
-
-    # === Pass 2 ===
+    
+    # Pass 2 - фиксированный битрейт
     target_kbps = max(int((MAX_SIZE_BYTES * 8 * 0.9) / (duration * 1000)), 50)
     cmd2 = [
         "ffmpeg", "-y", "-i", input_path, "-t", str(duration),
-        "-vf", vf, "-an",
-        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+        "-vf", vf, "-an", "-c:v", "libvpx-vp9",
         "-b:v", f"{target_kbps}k", "-maxrate", f"{target_kbps}k",
         "-bufsize", f"{target_kbps * 2}k",
         "-deadline", "good", "-cpu-used", "4",
         output_path
     ]
-    result2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-    if result2.returncode != 0:
-        logger.error(f"FFmpeg Pass 2 error: {result2.stderr}")
-
-    return os.path.exists(output_path) and os.path.getsize(output_path) <= MAX_SIZE_BYTES
+    subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    success = os.path.exists(output_path) and os.path.getsize(output_path) <= MAX_SIZE_BYTES
+    if success:
+        logger.info("SUCCESS on pass 2 with %dk bitrate", target_kbps)
+    else:
+        logger.warning("FAILED both passes")
+    return success
 
 # ======================= TELEGRAM HANDLERS =======================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -130,33 +126,30 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if not video:
         return
-
+    
     file_id = video.file_id
     input_path = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
     output_path = os.path.join(OUTPUT_DIR, f"{file_id}.webm")
-
+    
     try:
         await message.reply_text("⬇️ Скачиваю видео...")
         tg_file = await context.bot.get_file(file_id)
         await tg_file.download_to_drive(input_path)
-
-        await message.reply_text("⚙️ Конвертирую (сохраняю пропорции)...")
-
+        
+        w, h = get_video_dimensions(input_path)
+        new_w, new_h = calc_scaled_dimensions(w, h)
+        await message.reply_text(f"⚙️ Конвертирую в WebM ({new_w}x{new_h})...")
+        
         success = convert_to_webm(input_path, output_path)
-
+        
         if success:
-            out_w, out_h = get_output_dimensions(output_path)
             size_kb = os.path.getsize(output_path) / 1024
-
-            logger.info(f"OUTPUT SIZE: {out_w}x{out_h} | {size_kb:.1f} KB")
-
             with open(output_path, "rb") as f:
                 await message.reply_document(
                     document=f,
                     filename="sticker.webm",
                     caption=f"✅ Готово! {size_kb:.1f} КБ\n"
-                            f"Размер: {out_w}×{out_h} px (длинная сторона 512)\n"
-                            "Пропорции сохранены • VP9 • ≤3с • без звука"
+                            f"WebM VP9 • {new_w}x{new_h} • до 3с • без звука"
                 )
         else:
             await message.reply_text("❌ Не удалось уложиться в 256 КБ. Попробуй короче видео.")
@@ -166,18 +159,16 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         for p in (input_path, output_path):
             if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except:
-                    pass
+                try: os.remove(p)
+                except: pass
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Отправь видео или GIF\n\n"
-        "Я сделаю стикер с сохранением пропорций:\n"
+        "Я сделаю стикер:\n"
         "• Длинная сторона = 512 px\n"
-        "• Короткая сторона ≤ 512 px\n"
-        "• Без обрезки в квадрат!"
+        "• Короткая сторона сохраняет пропорции (≤512)\n"
+        "• до 3 сек • без звука • до 256 КБ"
     )
 
 def create_app():
