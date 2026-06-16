@@ -1,9 +1,6 @@
 # Telegram WebM Sticker Bot
 
 A Telegram bot that converts videos and GIFs into WebM stickers compatible with Telegram's sticker requirements.
-
-## What it does
-
 Send the bot any video or GIF and it returns a `.webm` file ready to use as an animated Telegram sticker:
 
 - Format: WebM (VP9 codec)
@@ -21,8 +18,8 @@ Send the bot any video or GIF and it returns a `.webm` file ready to use as an a
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/your-repo.git
-cd your-repo
+git clone https://github.com/your-username/telegram-webm-bot.git
+cd telegram-webm-bot
 pip install -r requirements.txt
 ```
 
